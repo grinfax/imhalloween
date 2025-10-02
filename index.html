@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>IM Halloween party</title>
+<style>
+  :root { --fade: 220ms; }
+  html, body { height: 100%; margin: 0; }
+  body { display:grid; place-items:center; background:#0b0b0b; color:#fff; font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  #start { padding:.9rem 1.2rem; border:0; border-radius:.6rem; font-weight:600; cursor:pointer; }
+  .hint{opacity:.7; margin-top:.6rem; font-size:.9rem}
+
+  /* Fullscreen overlay */
+  #overlay{
+    position:fixed; inset:0; z-index:9999;
+    display:grid; place-items:center;
+    background:rgba(0,0,0,.9);
+    opacity:0; pointer-events:none;
+    transition:opacity var(--fade) ease;
+  }
+  #overlay.active{ opacity:1; pointer-events:auto; }
+  #overlay img{
+    max-width:100vw; max-height:100vh; object-fit:contain;
+    filter: drop-shadow(0 12px 40px rgba(0,0,0,.6));
+  }
+
+  /* Keep capture elements tiny but "on-screen" so some browsers keep them live */
+  video, canvas {
+    position:fixed; width:1px; height:1px; right:0; bottom:0; opacity:0; pointer-events:none;
+  }
+
+  /* tiny debug readout (optional) */
+  #debug { position:fixed; left:8px; bottom:8px; font:12px/1 mono; opacity:.6 }
+</style>
+</head>
+<body>
+  <div>
+<a href="#" id="start">   <img src="im.jpg" alt="Get your degree in Interactive Media" height="100%" style="margin: auto;"></a> 
+
+  </div>
+
+  <!-- Hidden capture elements -->
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas" width="160" height="120"></canvas>
+
+  <!-- Overlay with a built-in SVG image (replace if you want) -->
+  <div id="overlay" aria-hidden="true">
+    <img id="overlayImg" src="sebas.png"  height="100%" alt="Alert">
+  </div>
+
+  <div id="debug"></div>
+
+<script>
+(() => {
+  const startBtn  = document.getElementById('start');
+  const video     = document.getElementById('video');
+  const canvas    = document.getElementById('canvas');
+  const ctx       = canvas.getContext('2d', { willReadFrequently: true });
+  const overlay   = document.getElementById('overlay');
+  const debug     = document.getElementById('debug');
+
+  // Tunables
+  const OVERLAY_MS = 4000;      // show overlay for 4s
+  const CHECK_EVERY_MS = 120;   // motion sampling interval
+  const PIXEL_DIFF_THR = 28;    // per-pixel avg RGB diff threshold (0..255)
+  const TRIGGER_FRACTION = 0.04; // fraction of pixels that must differ
+  const COOLDOWN_MS = 4500;     // no retrigger inside cooldown
+
+  let prev = null;
+  let running = false;
+  let timer = null;
+  let lastTrigger = 0;
+  let screamAudio = null;
+
+  function ensureHttpsNotice() {
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+      console.warn('getUserMedia requires HTTPS or localhost on most browsers.');
+    }
+  }
+
+  async function start() {
+    ensureHttpsNotice();
+    startBtn.disabled = true;
+
+    try {
+      // Preload scream.mp3
+      screamAudio = new Audio('scream.mp3');
+      screamAudio.preload = 'auto';
+
+      // Ask for camera
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      video.srcObject = stream;
+
+      // Wait for dimensions, then play
+      await new Promise(r => video.onloadedmetadata = r);
+      await video.play(); // some browsers need explicit play()
+
+      running = true;
+      prev = null;
+
+      // Start sampling loop
+      if (timer) clearInterval(timer);
+      timer = setInterval(sample, CHECK_EVERY_MS);
+
+      // Pause if tab hidden (saves CPU)
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { clearInterval(timer); timer = null; }
+        else if (running && !timer) { timer = setInterval(sample, CHECK_EVERY_MS); }
+      }, { passive: true });
+    } catch (err) {
+      console.error(err);
+      alert('Camera access failed. Use HTTPS or localhost and allow camera permissions.');
+      startBtn.disabled = false;
+    }
+  }
+
+  function sample() {
+    if (!running) return;
+
+    // Draw the current frame scaled to canvas (160x120 by default)
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const curr = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    if (prev) {
+      const changed = diffCount(prev.data, curr.data, PIXEL_DIFF_THR);
+      const total = canvas.width * canvas.height;
+      const frac  = changed / total;
+
+      // tiny debug readout
+      if (debug) debug.textContent = `motion: ${(frac*100).toFixed(1)}%  (thr: ${(TRIGGER_FRACTION*100)}%)`;
+
+      if (frac >= TRIGGER_FRACTION && (performance.now() - lastTrigger) > COOLDOWN_MS) {
+        lastTrigger = performance.now();
+        triggerOverlay();
+      }
+    }
+    prev = curr;
+  }
+
+  function diffCount(a, b, thr) {
+    let changed = 0;
+    // stride 4 (r,g,b,a); sample every other pixel to speed up
+    for (let i = 0; i < a.length; i += 8) {
+      const dr = Math.abs(a[i]   - b[i]);
+      const dg = Math.abs(a[i+1] - b[i+1]);
+      const db = Math.abs(a[i+2] - b[i+2]);
+      if ((dr + dg + db) / 3 > thr) changed++;
+    }
+    return changed;
+  }
+
+  function triggerOverlay() {
+    // Show
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+
+    // Play scream.mp3 immediately
+    if (screamAudio) {
+      screamAudio.currentTime = 0; // Reset to start
+      screamAudio.play().catch(e => console.error('Audio playback failed:', e));
+    }
+
+    // Hide after OVERLAY_MS
+    setTimeout(() => {
+      overlay.classList.remove('active');
+      overlay.setAttribute('aria-hidden', 'true');
+    }, OVERLAY_MS);
+  }
+
+  // Cleanup
+  window.addEventListener('beforeunload', () => {
+    running = false;
+    if (timer) clearInterval(timer);
+    const s = video.srcObject;
+    if (s) s.getTracks().forEach(t => t.stop());
+  });
+
+  // Hook UI
+  startBtn.addEventListener('click', start);
+})();
+</script>
+</body>
+</html>
